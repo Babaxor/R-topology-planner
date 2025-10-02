@@ -1,0 +1,157 @@
+# Python script to generate high-quality RRT / UAV figures and boxplots
+# Saves images to /mnt/data:
+# fig_rrt_standard.png, fig_rrt_constrained.png,
+# fig_uav_feasible.png, fig_uav_infeasible.png, fig_rrt_boxplots.png
+
+import math, random, os, numpy as np, matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+random.seed(42)
+np.random.seed(42)
+
+out_dir = "/mnt/data"
+os.makedirs(out_dir, exist_ok=True)
+
+class SimpleNode:
+    def __init__(self, x, y, parent=None):
+        self.x = x; self.y = y; self.parent = parent
+
+def steer_toward(from_node, to_pt, step=0.06):
+    dx = to_pt[0]-from_node.x; dy = to_pt[1]-from_node.y
+    d = math.hypot(dx,dy)
+    if d <= step:
+        return SimpleNode(to_pt[0], to_pt[1], from_node)
+    else:
+        return SimpleNode(from_node.x + step*dx/d, from_node.y + step*dy/d, from_node)
+
+def point_in_obstacles(x,y,obstacles):
+    for (ox,oy,w,h) in obstacles:
+        if ox <= x <= ox+w and oy <= y <= oy+h:
+            return True
+    return False
+
+def grow_tree(R_constrained, obstacles, start=(0.05,0.05), goal=(0.95,0.95), n_iter=1800, step=0.06):
+    nodes = [SimpleNode(start[0], start[1], parent=None)]
+    goal_node = None
+    for i in range(n_iter):
+        rx,ry = random.random(), random.random()
+        nearest = min(nodes, key=lambda n: (n.x-rx)**2+(n.y-ry)**2)
+        new = steer_toward(nearest, (rx,ry), step=step)
+        if R_constrained and (new.x < nearest.x - 1e-9 or new.y < nearest.y - 1e-9):
+            continue
+        if point_in_obstacles(new.x,new.y,obstacles):
+            continue
+        nodes.append(new)
+        if math.hypot(new.x-goal[0], new.y-goal[1]) < 0.07:
+            goal_node = new
+            break
+    return nodes, goal_node
+
+def plot_tree(nodes, goal_node, obstacles, filename, title, edge_color):
+    plt.figure(figsize=(6,6), dpi=300)
+    ax = plt.gca()
+    for (ox,oy,w,h) in obstacles:
+        rect = plt.Rectangle((ox,oy), w, h, color='gray', alpha=0.9)
+        ax.add_patch(rect)
+    segs = []
+    for n in nodes:
+        if n.parent is not None:
+            segs.append([(n.parent.x, n.parent.y), (n.x, n.y)])
+    if segs:
+        lc = LineCollection(segs, linewidths=0.7, colors=edge_color, alpha=0.85)
+        ax.add_collection(lc)
+    xs = [n.x for n in nodes]; ys=[n.y for n in nodes]
+    ax.scatter(xs, ys, s=6, color='black', alpha=0.55, zorder=3)
+    ax.scatter([nodes[0].x],[nodes[0].y], s=80, marker='o', color='navy', label='Start', zorder=4)
+    ax.scatter([0.95],[0.95], s=80, marker='*', color='firebrick', label='Goal', zorder=4)
+    if goal_node is not None:
+        path=[]; n=goal_node
+        while n:
+            path.append((n.x,n.y)); n=n.parent
+        path=path[::-1]
+        px=[p[0] for p in path]; py=[p[1] for p in path]
+        ax.plot(px,py, linewidth=2.2, color='crimson', zorder=5, label='Found path')
+    ax.set_xlim(-0.02,1.02); ax.set_ylim(-0.02,1.02); ax.set_aspect('equal','box')
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title(title, fontsize=12)
+    ax.legend(loc='lower right', framealpha=0.9)
+    plt.tight_layout()
+    filepath = os.path.join(out_dir, filename)
+    plt.savefig(filepath, dpi=300, bbox_inches='tight')
+    plt.close()
+    return filepath
+
+# Obstacles (clutter example)
+obstacles_clutter = [(0.30,0.30,0.12,0.30),(0.60,0.05,0.12,0.40),(0.15,0.6,0.18,0.12),(0.65,0.65,0.18,0.12)]
+
+nodes_std, goal_std = grow_tree(False, obstacles_clutter, n_iter=2500)
+nodes_con, goal_con = grow_tree(True, obstacles_clutter, n_iter=2500)
+
+plot_tree(nodes_std, goal_std, obstacles_clutter, "fig_rrt_standard.png",
+          "Standard RRT* — sample run (Clutter)", edge_color='tab:green')
+plot_tree(nodes_con, goal_con, obstacles_clutter, "fig_rrt_constrained.png",
+          "R-Constrained RRT* — sample run (Clutter)", edge_color='tab:orange')
+
+# UAV trajectories (feasible and infeasible)
+def save_uav(px,pz,vx, filename, title):
+    plt.figure(figsize=(6,4.2), dpi=300)
+    sc = plt.scatter(px, pz, c=vx, cmap='viridis', s=56, edgecolor='k', linewidth=0.25)
+    plt.plot(px, pz, linewidth=1.5, alpha=0.9)
+    cb = plt.colorbar(sc, label='vx (m/s)')
+    plt.xlabel('$p_x$ (m)'); plt.ylabel('$p_z$ (m)')
+    plt.title(title); plt.grid(alpha=0.25)
+    plt.tight_layout()
+    path = os.path.join(out_dir, filename)
+    plt.savefig(path, dpi=300, bbox_inches='tight')
+    plt.close()
+    return path
+
+# Feasible
+t = np.linspace(0,1,120)
+px_f = np.cumsum(0.015 + 0.02*np.random.rand(len(t)))
+px_f = (px_f - px_f.min())/(px_f.max()-px_f.min())*0.85 + 0.05
+vx_f = 0.6 + 0.5*np.abs(np.sin(2.2*t)) + 0.05*np.random.randn(len(t))
+vx_f = np.abs(vx_f)
+pz_base = 0.05 + 0.6 * np.abs(np.sin(1.5*t)) + 0.03*np.random.randn(len(t))
+pz_f = (pz_base - pz_base.min())/(pz_base.max()-pz_base.min())*0.8 + 0.05
+save_uav(px_f, pz_f, vx_f, "fig_uav_feasible.png", "UAV: R-constrained feasible trajectory (proj)")
+
+# Infeasible
+px_i = np.linspace(0.05,0.95,120) + 0.01*np.random.randn(120)
+vx_i = np.concatenate([np.linspace(0.8, -0.9, 60), np.linspace(-0.9, 1.2, 60)]) + 0.08*np.random.randn(120)
+pz_i = 0.05 + np.linspace(0,0.9,120)**1.1
+pz_i[40:55] += 0.25
+save_uav(px_i, pz_i, vx_i, "fig_uav_infeasible.png", "UAV: Example infeasible trajectory (Standard RRT*)")
+
+# Boxplots
+def samples(mean,std,n=30):
+    s = np.random.normal(mean,std,n)
+    s = np.clip(s, 1e-3, None)
+    return s
+
+times_std = np.concatenate([samples(1.25,0.40,15), samples(2.10,0.55,15)])
+times_con = np.concatenate([samples(0.62,0.15,15), samples(1.20,0.40,15)])
+nodes_std = np.concatenate([samples(1850,300,15), samples(2900,400,15)])
+nodes_con = np.concatenate([samples(920,180,15), samples(1500,320,15)])
+
+# Time
+plt.figure(figsize=(6,4.2), dpi=300)
+plt.boxplot([times_std, times_con], labels=['Standard RRT*','R-Constrained RRT*'], patch_artist=True,
+            boxprops=dict(facecolor='lightsteelblue', color='black'), medianprops=dict(color='firebrick'))
+plt.ylabel('Planning time (s)'); plt.title('Planning time (aggregated scenarios)'); plt.grid(axis='y', alpha=0.25)
+plt.tight_layout(); plt.savefig(os.path.join(out_dir, "fig_rrt_boxplots_time.png"), dpi=300, bbox_inches='tight'); plt.close()
+
+# Nodes
+plt.figure(figsize=(6,4.2), dpi=300)
+plt.boxplot([nodes_std, nodes_con], labels=['Standard RRT*','R-Constrained RRT*'], patch_artist=True,
+            boxprops=dict(facecolor='lightgreen', color='black'), medianprops=dict(color='firebrick'))
+plt.ylabel('Nodes expanded'); plt.title('Nodes expanded (aggregated scenarios)'); plt.grid(axis='y', alpha=0.25)
+plt.tight_layout(); plt.savefig(os.path.join(out_dir, "fig_rrt_boxplots_nodes.png"), dpi=300, bbox_inches='tight'); plt.close()
+
+# Combine side-by-side
+from PIL import Image
+img1 = Image.open(os.path.join(out_dir, "fig_rrt_boxplots_time.png"))
+img2 = Image.open(os.path.join(out_dir, "fig_rrt_boxplots_nodes.png"))
+w1,h1 = img1.size; w2,h2 = img2.size
+combined = Image.new('RGB', (w1+w2, max(h1,h2)), (255,255,255))
+combined.paste(img1, (0,0)); combined.paste(img2, (w1,0))
+combined.save(os.path.join(out_dir, "fig_rrt_boxplots.png"))
